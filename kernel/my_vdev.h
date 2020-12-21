@@ -1,0 +1,18 @@
+#ifndef __DEFERRED_H__
+#define __DEFERRED_H__
+
+#define MODULE_NAME "VDEV"
+
+#define VDEV_MAJOR 42
+#define VDEV_MINOR 0
+#define VDEV_DEV_COUNT 1
+
+#define I8042_KBD_IRQ 1
+#define I8042_STATUS_REG 0x64
+#define I8042_DATA_REG 0x60
+
+#define SCANCODE_RELEASED_MASK 0x80
+#define SCANCODE_LALT_MASK 0x38
+#define SCANCODE_W_MASK 0x11
+
+#endif
