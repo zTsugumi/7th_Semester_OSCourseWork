@@ -12,10 +12,6 @@ void error(char* msg)
   exit(EXIT_FAILURE);
 }
 
-static struct something {
-  int a;
-} a[1];
-
 int main()
 {
   int fd;

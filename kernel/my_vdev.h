@@ -17,12 +17,6 @@
 #define CMD_MAP 0
 #define CMD_SPD 1
 
-#define STATE_UNDEFINE 0
-#define STATE_UP 0
-#define STATE_DOWN 0
-#define STATE_LEFT 0
-#define STATE_RIGHT 0
-
 #define BUF_SIZE 64
 
 /********************************** STRUCTURE ***********************************/
@@ -30,10 +24,11 @@ static struct vdev { // Wrapper struct for char device
   struct cdev cdev;
   spinlock_t lock;
   u8 buf[2]; // buffer to store last 2 pressed key
-  char map[4]; // map for mouse movement: UP, DOWN, LEFT, RIGHT
+  char map[8]; // map for mouse movement: UP, DOWN, LEFT, RIGHT
   int spd; // mouse movement speed
-  int current_state; // UP, DOWN, LEFT, RIGHT
 } devs[1];
+
+static struct input_dev* mouse_dev;
 
 static struct class* dev_class;
 

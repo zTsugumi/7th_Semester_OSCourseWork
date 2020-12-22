@@ -4,6 +4,10 @@
  * A kernel module to create a virtual device (vdev) driver that used 
  * to control mouse movement by keyboard keystroke (Ctrl + <symbol>)
  * 
+ * There are 2 devices here. 
+ *    1 char device to get config from user
+ *    1 input device to control mouse movement
+ * 
  * HOW IT WORKS?
  * 1. vdev gets the configuration from user through fops (by default "wsad")
  * 2. TOP-HALF
@@ -16,10 +20,11 @@
  */
 
 #include <asm/io.h>
-#include <linux/cdev.h>
+#include <linux/cdev.h> // for char device
 #include <linux/device.h> // for creating device file
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/input.h> // for input device
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/kdev_t.h> // for creating device file
@@ -74,13 +79,21 @@ void mouse_tasklet_handler(unsigned long arg)
     char ch = scancode_to_ascii(data->buf[1]);
 
     if (ch == data->map[0]) {
-      pr_info("MOVE UP");
+      //pr_info("MOVE UP");
+      input_report_rel(mouse_dev, REL_Y, -data->spd);
+      input_sync(mouse_dev);
     } else if (ch == data->map[1]) {
-      pr_info("MOVE DOWN");
+      //pr_info("MOVE DOWN");
+      input_report_rel(mouse_dev, REL_Y, data->spd);
+      input_sync(mouse_dev);
     } else if (ch == data->map[2]) {
-      pr_info("MOVE LEFT");
+      //pr_info("MOVE LEFT");
+      input_report_rel(mouse_dev, REL_X, -data->spd);
+      input_sync(mouse_dev);
     } else if (ch == data->map[3]) {
-      pr_info("MOVE RIGHT");
+      //pr_info("MOVE RIGHT");
+      input_report_rel(mouse_dev, REL_X, data->spd);
+      input_sync(mouse_dev);
     }
   }
 }
@@ -225,7 +238,6 @@ static int __init vdev_init(void)
   devs[0].map[2] = 'a';
   devs[0].map[3] = 'd';
   devs[0].spd = 10;
-  devs[0].current_state = STATE_UNDEFINE;
 
   /* 4. Register IRQ handler for keyboard IRQ (IRQ1) */
   err = request_irq(
@@ -260,16 +272,52 @@ static int __init vdev_init(void)
     goto out_class_destroy;
   }
 
-  /* 7. Init tasklet mouse */
+  /* 7. Allocate mouse device */
+  mouse_dev = input_allocate_device();
+  if (mouse_dev == NULL) {
+    err = -1;
+    pr_err("VDEV: input_dev registered failed\n");
+    goto out_device_destroy;
+  }
+
+  /* 8. Init mouse device */
+  mouse_dev->name = MODULE_NAME;
+  mouse_dev->phys = MODULE_NAME;
+  mouse_dev->id.bustype = BUS_VIRTUAL;
+  mouse_dev->id.vendor = 0x0000;
+  mouse_dev->id.product = 0x0000;
+  mouse_dev->id.version = 0x0000;
+
+  set_bit(EV_REL, mouse_dev->evbit);
+  set_bit(REL_X, mouse_dev->relbit);
+  set_bit(REL_Y, mouse_dev->relbit);
+  set_bit(EV_KEY, mouse_dev->evbit);
+  set_bit(BTN_LEFT, mouse_dev->keybit);
+  set_bit(BTN_RIGHT, mouse_dev->keybit);
+
+  /* 9. Regsiter mouse device to system */
+  err = input_register_device(mouse_dev);
+  if (err != 0) {
+    pr_err("VDEV: input_register_device failed\n");
+    goto out_input_free_device;
+  }
+
+  /* 10. Init tasklet mouse */
   if ((mouse_tasklet = kmalloc(sizeof(struct tasklet_struct), GFP_KERNEL)) == NULL) {
     err = -1;
     pr_err("VDEV: kmalloc failed");
-    goto out_device_destroy;
+    goto out_input_unregister_device;
   }
   tasklet_init(mouse_tasklet, mouse_tasklet_handler, (unsigned long)&devs[0]);
 
   pr_notice("VDEV: Driver %s loaded\n", MODULE_NAME);
   return 0;
+
+out_input_unregister_device:
+  input_unregister_device(mouse_dev);
+
+out_input_free_device:
+  input_free_device(mouse_dev);
 
 out_device_destroy:
   device_destroy(dev_class, devnum);
@@ -311,6 +359,12 @@ static void __exit vdev_exit(void)
   /* 5. Destroy struct class + device file */
   device_destroy(dev_class, devnum);
   class_destroy(dev_class);
+
+  /* 6. Unregister input device*/
+  input_unregister_device(mouse_dev);
+
+  /* 7. Free input device */
+  input_free_device(mouse_dev);
 
   pr_notice("VDEV: Driver %s unloaded\n", MODULE_NAME);
 }
