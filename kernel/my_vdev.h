@@ -1,5 +1,5 @@
-#ifndef __DEFERRED_H__
-#define __DEFERRED_H__
+#ifndef __MY_VDEV_H__
+#define __MY_VDEV_H__
 
 #define MODULE_NAME "VDEV"
 
@@ -13,6 +13,69 @@
 
 #define SCANCODE_RELEASED_MASK 0x80
 #define SCANCODE_LALT_MASK 0x38
-#define SCANCODE_W_MASK 0x11
+
+#define CMD_MAP 0
+#define CMD_SPD 1
+
+#define STATE_UNDEFINE 0
+#define STATE_UP 0
+#define STATE_DOWN 0
+#define STATE_LEFT 0
+#define STATE_RIGHT 0
+
+#define BUF_SIZE 64
+
+/********************************** STRUCTURE ***********************************/
+static struct vdev { // Wrapper struct for char device
+  struct cdev cdev;
+  spinlock_t lock;
+  u8 buf[2]; // buffer to store last 2 pressed key
+  char map[4]; // map for mouse movement: UP, DOWN, LEFT, RIGHT
+  int spd; // mouse movement speed
+  int current_state; // UP, DOWN, LEFT, RIGHT
+} devs[1];
+
+static struct class* dev_class;
+
+static struct tasklet_struct* mouse_tasklet;
+
+/********************************** INTERFACE ***********************************/
+/*
+ * Return the value of the DATA register
+ */
+static inline u8 i8042_read_data(void);
+
+/*
+ * Check if a given scancode corresponds to key press or release
+ */
+static int is_key_pressed(u8);
+
+/*
+ * Put scancode to device data
+ */
+static void put_scancode(struct vdev*, u8);
+
+/*
+ * Return a character of a given scancode
+ */
+static int scancode_to_ascii(u8);
+
+/*
+ * Mouse tasklet handler
+ */
+void mouse_tasklet_handler(unsigned long);
+
+/*
+ * Keyboard interrupt handler
+ */
+irqreturn_t kbd_interrupt_handler(int, void*);
+
+/*
+ * Driver functions
+ */
+static int vdev_open(struct inode*, struct file*);
+static int vdev_release(struct inode*, struct file*);
+// User space -> Device: get config from user
+static ssize_t vdev_write(struct file*, const char __user*, size_t, loff_t*);
 
 #endif

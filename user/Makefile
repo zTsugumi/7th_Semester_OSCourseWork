@@ -1,6 +1,6 @@
 CFLAGS=-Wall
 
-test.exe: test.o
+test: test.o
 
 .PHONY: clean
 

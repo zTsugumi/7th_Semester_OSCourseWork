@@ -1,8 +1,8 @@
 #include <fcntl.h> // open
 #include <stdio.h>
 #include <stdlib.h> // EXIT_FAILURE
-#include <unistd.h> // write, exit
 #include <string.h>
+#include <unistd.h> // write, exit
 
 #define DEVICE_PATH "/dev/VDEV"
 
@@ -11,6 +11,10 @@ void error(char* msg)
   perror(msg);
   exit(EXIT_FAILURE);
 }
+
+static struct something {
+  int a;
+} a[1];
 
 int main()
 {
@@ -21,9 +25,11 @@ int main()
     error("Device path not found");
 
   // Write config to device
-  char* buffer = "ujhk";
+  char* map = "0 ujhk";
+  write(fd, map, strlen(map));
 
-  write(fd, buffer, strlen(buffer));
+  char* spd = "1 50";
+  write(fd, spd, strlen(spd));
 
   close(fd);
 

@@ -25,6 +25,7 @@
 #include <linux/kdev_t.h> // for creating device file
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h> // for kmalloc, kfree
 #include <linux/spinlock.h>
 #include <linux/uaccess.h> // for user access
 
@@ -34,45 +35,6 @@ MODULE_DESCRIPTION(MODULE_NAME);
 MODULE_AUTHOR("zTsugumi");
 MODULE_LICENSE("GPL");
 
-/********************************** STRUCTURE ***********************************/
-static struct vdev { // Wrapper struct for char device
-  struct cdev cdev;
-  spinlock_t lock;
-  u8 buf[2]; // a buffer to store last 2 pressed key
-  char config[4]; // a map for mouse movement: UP, DOWN, LEFT, RIGHT
-} devs[1];
-
-static struct class* dev_class;
-
-/********************************** INTERFACE ***********************************/
-/*
- * Return the value of the DATA register
- */
-static inline u8 i8042_read_data(void);
-
-/*
- * Check if a given scancode corresponds to key press or release
- */
-static int is_key_pressed(unsigned int);
-
-/*
- * Put scancode to device data
- */
-static void put_scancode(struct vdev*, u8);
-
-/*
- * Keyboard interrupt handler
- */
-irqreturn_t kbd_interrupt_handler(int, void*);
-
-/*
- * Driver functions
- */
-static int vdev_open(struct inode*, struct file*);
-static int vdev_release(struct inode*, struct file*);
-// User space -> Device: get config from user
-static ssize_t vdev_write(struct file*, const char __user*, size_t, loff_t*);
-
 static const struct file_operations vdev_fops = {
   .owner = THIS_MODULE,
   .open = vdev_open,
@@ -81,6 +43,47 @@ static const struct file_operations vdev_fops = {
 };
 
 /*********************************** TASKLET ************************************/
+static int scancode_to_ascii(u8 scancode)
+{
+  static char* row1 = "1234567890";
+  static char* row2 = "qwertyuiop";
+  static char* row3 = "asdfghjkl";
+  static char* row4 = "zxcvbnm";
+
+  scancode &= ~SCANCODE_RELEASED_MASK;
+  if (scancode >= 0x02 && scancode <= 0x0b)
+    return *(row1 + scancode - 0x02);
+  if (scancode >= 0x10 && scancode <= 0x19)
+    return *(row2 + scancode - 0x10);
+  if (scancode >= 0x1e && scancode <= 0x26)
+    return *(row3 + scancode - 0x1e);
+  if (scancode >= 0x2c && scancode <= 0x32)
+    return *(row4 + scancode - 0x2c);
+  if (scancode == 0x39)
+    return ' ';
+  if (scancode == 0x1c)
+    return '\n';
+  return '?';
+}
+
+void mouse_tasklet_handler(unsigned long arg)
+{
+  struct vdev* data = (struct vdev*)arg;
+  //pr_info("VDEV: [0]: 0x%x, [1]: 0x%x", data->buf[0], data->buf[1]);
+  if (data->buf[0] == SCANCODE_LALT_MASK) {
+    char ch = scancode_to_ascii(data->buf[1]);
+
+    if (ch == data->map[0]) {
+      pr_info("MOVE UP");
+    } else if (ch == data->map[1]) {
+      pr_info("MOVE DOWN");
+    } else if (ch == data->map[2]) {
+      pr_info("MOVE LEFT");
+    } else if (ch == data->map[3]) {
+      pr_info("MOVE RIGHT");
+    }
+  }
+}
 
 /********************************** INTERRUPT ***********************************/
 static inline u8 i8042_read_data(void)
@@ -90,22 +93,23 @@ static inline u8 i8042_read_data(void)
   return val;
 }
 
-static int is_key_pressed(unsigned int scancode)
+static int is_key_pressed(u8 scancode)
 {
   return !(scancode & SCANCODE_RELEASED_MASK);
 }
 
 static void put_scancode(struct vdev* data, u8 scancode)
 {
+  char ch = scancode_to_ascii(scancode);
 
-  data->buf[0] = data->buf[1];
+  if (data->buf[0] != SCANCODE_LALT_MASK
+      || (ch == data->map[0] && ch == data->map[1]
+          && ch == data->map[2] && ch == data->map[3])) {
+    data->buf[0] = data->buf[1];
+  }
+
   data->buf[1] = scancode;
-
-  pr_info("[0]: 0x%x, [1]: 0x%x", data->buf[0], data->buf[1]);
-
-  if (data->buf[0] == SCANCODE_LALT_MASK
-      && data->buf[1] == SCANCODE_W_MASK)
-    pr_info("Accepted");
+  //pr_info("VDEV: [0]: 0x%x, [1]: 0x%x", data->buf[0], data->buf[1]);
 }
 
 irqreturn_t kbd_interrupt_handler(int irq_no, void* dev_id)
@@ -122,6 +126,8 @@ irqreturn_t kbd_interrupt_handler(int irq_no, void* dev_id)
     spin_lock(&data->lock);
     put_scancode(data, scancode);
     spin_unlock(&data->lock);
+
+    tasklet_schedule(mouse_tasklet);
   } else {
     // WIP
   }
@@ -138,35 +144,55 @@ static int vdev_open(struct inode* inode, struct file* file)
   struct vdev* data = container_of(inode->i_cdev, struct vdev, cdev);
 
   file->private_data = data;
-  pr_info("Device %s opened\n", MODULE_NAME);
+  pr_info("VDEV: Device file opened\n");
 
   return 0;
 }
 
 static int vdev_release(struct inode* inode, struct file* file)
 {
-  pr_info("Device %s closed\n", MODULE_NAME);
+  pr_info("VDEV: Device file closed\n");
   return 0;
 }
 
 static ssize_t vdev_write(struct file* file, const char __user* user_buffer,
-    size_t size, loff_t* offset)
+    size_t count, loff_t* offset)
 {
   struct vdev* data = (struct vdev*)file->private_data;
+  size_t size = BUF_SIZE < count ? BUF_SIZE : count;
+  char* buf;
+  char cmd;
 
-  // Malformed config
-  if (size != 4)
-    pr_info("User config incorrect!");
-  else {
-    if (copy_from_user(data->config, user_buffer, size))
-      return -EFAULT;
-    pr_info("User config: %c%c%c%c",
-        data->config[0],
-        data->config[1],
-        data->config[2],
-        data->config[3]);
+  if ((buf = (char*)kmalloc(size, GFP_KERNEL)) == NULL) {
+    pr_err("VDEV: kmalloc failed");
+    return -EFAULT;
   }
 
+  if (copy_from_user(buf, user_buffer, size)) {
+    pr_err("VDEV: copy_from_user failed\n");
+    kfree(buf);
+    return -EFAULT;
+  }
+
+  // Get cmd from user
+  memcpy(&cmd, buf, sizeof(char));
+  cmd = cmd - '0';
+
+  switch (cmd) {
+  case CMD_MAP:
+    memcpy(&data->map, buf + 2, 4);
+    // pr_info("VDEV: MAP: %s", data->map);
+    break;
+  case CMD_SPD:
+    kstrtol(buf + 2, 10, (long int*)&data->spd);
+    // pr_info("VDEV: SPD: %d", data->spd);
+    break;
+  default:
+    pr_info("VDEV: User config malformed");
+    break;
+  }
+
+  kfree(buf);
   return size;
 }
 
@@ -175,14 +201,14 @@ static int __init vdev_init(void)
   int err;
   dev_t devnum = MKDEV(VDEV_MAJOR, VDEV_MINOR);
 
-  /* 1. register char device */
+  /* 1. Register char device */
   err = register_chrdev_region(devnum, VDEV_DEV_COUNT, MODULE_NAME);
   if (err != 0) {
-    pr_err("register_region failed: %d\n", err);
+    pr_err("VDEV: register_region failed: %d\n", err);
     goto out;
   }
 
-  /* 2. request the keyboard I/O ports */
+  /* 2. Request the keyboard I/O ports */
   if (request_region(I8042_DATA_REG + 1, 1, MODULE_NAME) == NULL) {
     err = -EBUSY;
     goto out_unregister;
@@ -192,14 +218,16 @@ static int __init vdev_init(void)
     goto out_unregister;
   }
 
-  /* 3. init spinlock + default config */
+  /* 3. Init spinlock + default config */
   spin_lock_init(&devs[0].lock);
-  devs[0].config[0] = 'w';
-  devs[0].config[1] = 's';
-  devs[0].config[2] = 'a';
-  devs[0].config[3] = 'd';
+  devs[0].map[0] = 'w';
+  devs[0].map[1] = 's';
+  devs[0].map[2] = 'a';
+  devs[0].map[3] = 'd';
+  devs[0].spd = 10;
+  devs[0].current_state = STATE_UNDEFINE;
 
-  /* 4. register IRQ handler for keyboard IRQ (IRQ1) */
+  /* 4. Register IRQ handler for keyboard IRQ (IRQ1) */
   err = request_irq(
       I8042_KBD_IRQ, // IRQ line
       kbd_interrupt_handler,
@@ -207,33 +235,44 @@ static int __init vdev_init(void)
       MODULE_NAME, // use this to show dev in /proc/interrupts
       &devs[0]); // for share interrupt, dev_id can't be NULL
   if (err != 0) {
-    pr_err("request_irq failed: %d\n", err);
+    pr_err("VDEV: request_irq failed: %d\n", err);
     goto out_release_regions;
   }
 
-  /* 5. add char dev to system */
+  /* 5. Add char dev to system */
   cdev_init(&devs[0].cdev, &vdev_fops);
   err = cdev_add(&devs[0].cdev, devnum, VDEV_DEV_COUNT);
   if (err != 0) {
-    pr_err("cdev_add failed: %d\n", err);
+    pr_err("VDEV: cdev_add failed: %d\n", err);
     goto out_release_regions;
   }
 
-  /* 6. create struct class + device file */
+  /* 6. Create struct class + device file */
   if ((dev_class = class_create(THIS_MODULE, MODULE_NAME)) == NULL) {
     err = -1;
-    pr_err("class_create failed\n");
+    pr_err("VDEV: class_create failed\n");
     goto out_cdev_del;
   }
 
   if ((device_create(dev_class, NULL, devnum, NULL, MODULE_NAME)) == NULL) {
     err = -1;
-    pr_err("device_create failed\n");
+    pr_err("VDEV: device_create failed\n");
     goto out_class_destroy;
   }
 
-  pr_notice("Driver %s loaded\n", MODULE_NAME);
+  /* 7. Init tasklet mouse */
+  if ((mouse_tasklet = kmalloc(sizeof(struct tasklet_struct), GFP_KERNEL)) == NULL) {
+    err = -1;
+    pr_err("VDEV: kmalloc failed");
+    goto out_device_destroy;
+  }
+  tasklet_init(mouse_tasklet, mouse_tasklet_handler, (unsigned long)&devs[0]);
+
+  pr_notice("VDEV: Driver %s loaded\n", MODULE_NAME);
   return 0;
+
+out_device_destroy:
+  device_destroy(dev_class, devnum);
 
 out_class_destroy:
   class_destroy(dev_class);
@@ -256,24 +295,24 @@ static void __exit vdev_exit(void)
 {
   dev_t devnum = MKDEV(VDEV_MAJOR, VDEV_MINOR);
 
-  /* 1. delete char device from system*/
+  /* 1. Delete char device from system*/
   cdev_del(&devs[0].cdev);
 
-  /* 2. free irq */
+  /* 2. Free irq */
   free_irq(I8042_KBD_IRQ, &devs[0]);
 
-  /* 3. release keyboard I/O ports */
+  /* 3. Release keyboard I/O ports */
   release_region(I8042_STATUS_REG + 1, 1);
   release_region(I8042_DATA_REG + 1, 1);
 
-  /* 4. unregister char device */
+  /* 4. Unregister char device */
   unregister_chrdev_region(devnum, VDEV_DEV_COUNT);
 
-  /* 5. destroy struct class + device file */
+  /* 5. Destroy struct class + device file */
   device_destroy(dev_class, devnum);
   class_destroy(dev_class);
 
-  pr_notice("Driver %s unloaded\n", MODULE_NAME);
+  pr_notice("VDEV: Driver %s unloaded\n", MODULE_NAME);
 }
 
 module_init(vdev_init);
