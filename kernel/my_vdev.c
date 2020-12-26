@@ -48,6 +48,11 @@ static const struct file_operations vdev_fops = {
 };
 
 /*********************************** TASKLET ************************************/
+static int is_key_pressed(u8 scancode)
+{
+  return !(scancode & SCANCODE_RELEASED_MASK);
+}
+
 static int scancode_to_ascii(u8 scancode)
 {
   static char* row1 = "1234567890";
@@ -74,26 +79,55 @@ static int scancode_to_ascii(u8 scancode)
 void mouse_tasklet_handler(unsigned long arg)
 {
   struct vdev* data = (struct vdev*)arg;
-  //pr_info("VDEV: [0]: 0x%x, [1]: 0x%x", data->buf[0], data->buf[1]);
-  if (data->buf[0] == SCANCODE_LALT_MASK) {
-    char ch = scancode_to_ascii(data->buf[1]);
+  int pressed;
 
-    if (ch == data->map[0]) {
-      //pr_info("MOVE UP");
-      input_report_rel(mouse_dev, REL_Y, -data->spd);
-      input_sync(mouse_dev);
-    } else if (ch == data->map[1]) {
-      //pr_info("MOVE DOWN");
-      input_report_rel(mouse_dev, REL_Y, data->spd);
-      input_sync(mouse_dev);
-    } else if (ch == data->map[2]) {
-      //pr_info("MOVE LEFT");
-      input_report_rel(mouse_dev, REL_X, -data->spd);
-      input_sync(mouse_dev);
-    } else if (ch == data->map[3]) {
-      //pr_info("MOVE RIGHT");
-      input_report_rel(mouse_dev, REL_X, data->spd);
-      input_sync(mouse_dev);
+  //pr_info("VDEV: [0]: 0x%x, [1]: 0x%x", data->buf[0], data->buf[1]);
+
+  pressed = is_key_pressed(data->buf[1]);
+
+  if (pressed) {
+    if (data->buf[0] == SCANCODE_LALT_MASK) {
+      char ch = scancode_to_ascii(data->buf[1]);
+
+      if (ch == data->map[0]) {
+        //pr_info("MOVE UP");
+        input_report_rel(mouse_dev, REL_Y, -data->spd);
+        input_sync(mouse_dev);
+      } else if (ch == data->map[1]) {
+        //pr_info("MOVE DOWN");
+        input_report_rel(mouse_dev, REL_Y, data->spd);
+        input_sync(mouse_dev);
+      } else if (ch == data->map[2]) {
+        //pr_info("MOVE LEFT");
+        input_report_rel(mouse_dev, REL_X, -data->spd);
+        input_sync(mouse_dev);
+      } else if (ch == data->map[3]) {
+        //pr_info("MOVE RIGHT");
+        input_report_rel(mouse_dev, REL_X, data->spd);
+        input_sync(mouse_dev);
+      } else if (ch == data->map[4]) {
+        //pr_info("BTN LEFT PRESSED");
+        input_report_key(mouse_dev, BTN_LEFT, 1);
+        input_sync(mouse_dev);
+      } else if (ch == data->map[5]) {
+        //pr_info("BTN RIGHT PRESSED");
+        input_report_key(mouse_dev, BTN_RIGHT, 1);
+        input_sync(mouse_dev);
+      }
+    }
+  } else {
+    if (data->buf[0] == SCANCODE_LALT_MASK) {
+      char ch = scancode_to_ascii(data->buf[1]);
+
+      if (ch == data->map[4]) {
+        //pr_info("BTN LEFT RELEASED");
+        input_report_key(mouse_dev, BTN_LEFT, 0);
+        input_sync(mouse_dev);
+      } else if (ch == data->map[5]) {
+        //pr_info("BTN RIGHT RELEASED");
+        input_report_key(mouse_dev, BTN_RIGHT, 0);
+        input_sync(mouse_dev);
+      }
     }
   }
 }
@@ -106,14 +140,11 @@ static inline u8 i8042_read_data(void)
   return val;
 }
 
-static int is_key_pressed(u8 scancode)
-{
-  return !(scancode & SCANCODE_RELEASED_MASK);
-}
-
 static void put_scancode(struct vdev* data, u8 scancode)
 {
-  char ch = scancode_to_ascii(scancode);
+  char ch = 0;
+
+  ch = scancode_to_ascii(scancode);
 
   if (data->buf[0] != SCANCODE_LALT_MASK
       || (ch == data->map[0] && ch == data->map[1]
@@ -127,23 +158,15 @@ static void put_scancode(struct vdev* data, u8 scancode)
 
 irqreturn_t kbd_interrupt_handler(int irq_no, void* dev_id)
 {
-  u8 scancode = 0;
-  int pressed;
+  u8 scancode = i8042_read_data();
 
-  scancode = i8042_read_data();
-  pressed = is_key_pressed(scancode);
+  struct vdev* data = (struct vdev*)dev_id;
 
-  if (pressed) {
-    struct vdev* data = (struct vdev*)dev_id;
+  spin_lock(&data->lock);
+  put_scancode(data, scancode);
+  spin_unlock(&data->lock);
 
-    spin_lock(&data->lock);
-    put_scancode(data, scancode);
-    spin_unlock(&data->lock);
-
-    tasklet_schedule(mouse_tasklet);
-  } else {
-    // WIP
-  }
+  tasklet_schedule(mouse_tasklet);
 
   // Report the interrupt as not handled
   // so that the original driver can
@@ -167,6 +190,28 @@ static int vdev_release(struct inode* inode, struct file* file)
   pr_info("VDEV: Device file closed\n");
   return 0;
 }
+
+// static ssize_t vdev_read(struct file* file, char __user* user_buffer,
+//     size_t count, loff_t* offset)
+// {
+//   struct vdev* data = (struct vdev*)file->private_data;
+//   size_t size = BUF_SIZE < count ? BUF_SIZE : count;
+//   char* buf;
+
+//   if ((buf = (char*)kmalloc(size, GFP_KERNEL)) == NULL) {
+//     pr_err("VDEV: kmalloc failed");
+//     return -EFAULT;
+//   }
+
+//   snprintf(buf, size, "Config:\nMAP: %s\nSPD: %d\n",
+//       data->map,
+//       data->spd);
+
+//   size = copy_to_user(user_buffer, buf, strlen(buf));
+
+//   kfree(buf);
+//   return size;
+// }
 
 static ssize_t vdev_write(struct file* file, const char __user* user_buffer,
     size_t count, loff_t* offset)
@@ -193,7 +238,7 @@ static ssize_t vdev_write(struct file* file, const char __user* user_buffer,
 
   switch (cmd) {
   case CMD_MAP:
-    memcpy(&data->map, buf + 2, 4);
+    memcpy(&data->map, buf + 2, 6);
     // pr_info("VDEV: MAP: %s", data->map);
     break;
   case CMD_SPD:
@@ -212,10 +257,15 @@ static ssize_t vdev_write(struct file* file, const char __user* user_buffer,
 static int __init vdev_init(void)
 {
   int err;
-  dev_t devnum = MKDEV(VDEV_MAJOR, VDEV_MINOR);
+  dev_t devnum;
 
   /* 1. Register char device */
-  err = register_chrdev_region(devnum, VDEV_DEV_COUNT, MODULE_NAME);
+  if (VDEV_MAJOR) {
+    devnum = MKDEV(VDEV_MAJOR, VDEV_MINOR);
+    err = register_chrdev_region(devnum, VDEV_DEV_COUNT, MODULE_NAME);
+  } else {
+    err = alloc_chrdev_region(&devnum, VDEV_MINOR, VDEV_DEV_COUNT, MODULE_NAME);
+  }
   if (err != 0) {
     pr_err("VDEV: register_region failed: %d\n", err);
     goto out;
@@ -233,10 +283,12 @@ static int __init vdev_init(void)
 
   /* 3. Init spinlock + default config */
   spin_lock_init(&devs[0].lock);
-  devs[0].map[0] = 'w';
-  devs[0].map[1] = 's';
-  devs[0].map[2] = 'a';
-  devs[0].map[3] = 'd';
+  devs[0].map[0] = 'w'; // UP
+  devs[0].map[1] = 's'; // DOWN
+  devs[0].map[2] = 'a'; // LEFT
+  devs[0].map[3] = 'd'; // RIGHT
+  devs[0].map[4] = 'j'; // BTNLEFT
+  devs[0].map[5] = 'k'; // BTNRIGHT
   devs[0].spd = 10;
 
   /* 4. Register IRQ handler for keyboard IRQ (IRQ1) */

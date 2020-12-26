@@ -24,7 +24,8 @@ static struct vdev { // Wrapper struct for char device
   struct cdev cdev;
   spinlock_t lock;
   u8 buf[2]; // buffer to store last 2 pressed key
-  char map[8]; // map for mouse movement: UP, DOWN, LEFT, RIGHT
+  char map[6]; // map for mouse movement: UP, DOWN, LEFT, RIGHT, BTNLEFT, BTNRIGHT
+
   int spd; // mouse movement speed
 } devs[1];
 
@@ -72,5 +73,7 @@ static int vdev_open(struct inode*, struct file*);
 static int vdev_release(struct inode*, struct file*);
 // User space -> Device: get config from user
 static ssize_t vdev_write(struct file*, const char __user*, size_t, loff_t*);
+// Device -> User space: send config to user
+// static ssize_t vdev_read(struct file*, const char __user*, size_t, loff_t*);
 
 #endif

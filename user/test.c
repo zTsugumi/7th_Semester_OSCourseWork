@@ -21,10 +21,10 @@ int main()
     error("Device path not found");
 
   // Write config to device
-  char* map = "0 ujhk";
+  char* map = "0 edsfkl";
   write(fd, map, strlen(map));
 
-  char* spd = "1 50";
+  char* spd = "1 20";
   write(fd, spd, strlen(spd));
 
   close(fd);
